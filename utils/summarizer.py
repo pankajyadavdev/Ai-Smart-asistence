@@ -1,16 +1,23 @@
 import os
 import requests
+import streamlit as st
 
 
 OLLAMA_URL = "https://ollama.com/api/generate"
 
-MODEL_NAME = os.getenv(
-    "OLLAMA_MODEL",
-    "gpt-oss:20b"
+
+# Get API key from Streamlit Cloud Secrets
+API_KEY = st.secrets.get(
+    "OLLAMA_API_KEY",
+    os.getenv("OLLAMA_API_KEY")
 )
 
-API_KEY = os.getenv(
-    "OLLAMA_API_KEY"
+MODEL_NAME = st.secrets.get(
+    "OLLAMA_MODEL",
+    os.getenv(
+        "OLLAMA_MODEL",
+        "gpt-oss:20b-cloud"
+    )
 )
 
 
@@ -18,8 +25,9 @@ def summarize_pdf(documents):
 
     if not API_KEY:
         raise RuntimeError(
-            "OLLAMA_API_KEY is missing. "
-            "Add it in Streamlit Cloud Secrets."
+            "OLLAMA_API_KEY was not found. "
+            "Check Streamlit Cloud → "
+            "Manage app → Settings → Secrets."
         )
 
     if not documents:
@@ -27,7 +35,6 @@ def summarize_pdf(documents):
             "No document content was provided."
         )
 
-    # Build document text
     parts = []
 
     for doc in documents:
@@ -35,7 +42,6 @@ def summarize_pdf(documents):
         text = doc.get("text", "").strip()
 
         if text:
-
             parts.append(
                 f"Page {doc.get('page', 1)}:\n{text}"
             )
@@ -47,27 +53,23 @@ def summarize_pdf(documents):
             "No text could be extracted from the PDF."
         )
 
-    # Keep the prompt manageable
     context = context[:20000]
 
     prompt = f"""
 You are an AI college study assistant.
 
-Create a clear and useful summary of the
-following study material.
+Summarize the following study material.
 
-Requirements:
-
-- Use ONLY the provided document.
+Rules:
+- Use only the provided material.
 - Do not invent information.
-- Include the main concepts.
+- Include important concepts.
 - Include important definitions.
 - Include important facts.
 - Use headings and bullet points.
-- Make the summary useful for exam preparation.
-- Do not mention information outside the document.
+- Make it useful for exam preparation.
 
-DOCUMENT:
+STUDY MATERIAL:
 
 {context}
 
@@ -90,40 +92,27 @@ SUMMARY:
             timeout=180,
         )
 
-    except requests.exceptions.Timeout:
-
-        raise RuntimeError(
-            "Summary generation timed out."
-        )
-
-    except requests.exceptions.ConnectionError:
-
-        raise RuntimeError(
-            "Could not connect to Ollama Cloud."
-        )
-
     except requests.exceptions.RequestException as error:
 
         raise RuntimeError(
-            f"Ollama request failed: {error}"
+            f"Could not connect to Ollama: {error}"
         )
 
     if response.status_code != 200:
 
         raise RuntimeError(
             f"Ollama API error "
-            f"{response.status_code}:\n"
+            f"{response.status_code}: "
             f"{response.text}"
         )
 
     try:
-
         result = response.json()
-
     except ValueError:
 
         raise RuntimeError(
-            "Ollama returned invalid JSON."
+            f"Invalid Ollama response: "
+            f"{response.text}"
         )
 
     if "error" in result:
@@ -140,7 +129,8 @@ SUMMARY:
     if not summary:
 
         raise RuntimeError(
-            "Ollama returned an empty summary."
+            f"Ollama returned no summary. "
+            f"Response: {result}"
         )
 
     return summary
