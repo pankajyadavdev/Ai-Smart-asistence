@@ -1,356 +1,146 @@
+import os
 import requests
 
 
-# ============================================================
-# CONFIG
-# ============================================================
+OLLAMA_URL = "https://ollama.com/api/generate"
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL_NAME = os.getenv(
+    "OLLAMA_MODEL",
+    "gpt-oss:20b"
+)
 
-MODEL_NAME = "llama3.2:3b"
-
-TIMEOUT = 600
-
-# For small PDFs, use one request.
-SMALL_PDF_PAGES = 10
-
-# Larger PDFs are processed in larger sections.
-LARGE_BATCH_SIZE = 10
-
-# Maximum generated tokens.
-SECTION_TOKENS = 350
-FINAL_TOKENS = 700
+API_KEY = os.getenv(
+    "OLLAMA_API_KEY"
+)
 
 
-# ============================================================
-# CHECK OLLAMA
-# ============================================================
+def summarize_pdf(documents):
 
-def check_ollama():
-
-    try:
-
-        response = requests.get(
-            "http://localhost:11434/api/tags",
-            timeout=10,
-        )
-
-        response.raise_for_status()
-
-        models = response.json().get(
-            "models",
-            []
-        )
-
-        model_names = [
-            model.get("name", "")
-            for model in models
-        ]
-
-        if MODEL_NAME not in model_names:
-
-            return False, (
-                f"Model '{MODEL_NAME}' was not found. "
-                f"Available models: {model_names}"
-            )
-
-        return True, ""
-
-    except requests.exceptions.ConnectionError:
-
-        return False, (
-            "Ollama is not running. "
-            "Start Ollama and try again."
-        )
-
-    except Exception as error:
-
-        return False, str(error)
-
-
-# ============================================================
-# OLLAMA REQUEST
-# ============================================================
-
-def ask_ollama(
-    prompt,
-    max_tokens,
-):
-
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-
-            # Keep the model loaded between requests.
-            "keep_alive": "10m",
-
-            "options": {
-                "temperature": 0.2,
-                "num_predict": max_tokens,
-
-                # Helps prevent unnecessary long context.
-                "num_ctx": 8192,
-            },
-        },
-        timeout=TIMEOUT,
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    answer = data.get(
-        "response",
-        "",
-    ).strip()
-
-    if not answer:
-
+    if not API_KEY:
         raise RuntimeError(
-            "Ollama returned an empty response."
+            "OLLAMA_API_KEY is missing. "
+            "Add it in Streamlit Cloud Secrets."
         )
 
-    return answer
+    if not documents:
+        raise ValueError(
+            "No document content was provided."
+        )
 
-
-# ============================================================
-# BUILD TEXT
-# ============================================================
-
-def build_text(documents):
-
+    # Build document text
     parts = []
 
-    for document in documents:
+    for doc in documents:
 
-        text = document.get(
-            "text",
-            "",
-        ).strip()
+        text = doc.get("text", "").strip()
 
-        if not text:
-            continue
+        if text:
 
-        page = document.get(
-            "page",
-            "?",
+            parts.append(
+                f"Page {doc.get('page', 1)}:\n{text}"
+            )
+
+    context = "\n\n".join(parts)
+
+    if not context:
+        raise ValueError(
+            "No text could be extracted from the PDF."
         )
 
-        parts.append(
-            f"Page {page}:\n{text}"
-        )
-
-    return "\n\n".join(parts)
-
-
-# ============================================================
-# SUMMARIZE ONE SECTION
-# ============================================================
-
-def summarize_section(documents):
-
-    text = build_text(documents)
-
-    if not text:
-        return ""
+    # Keep the prompt manageable
+    context = context[:20000]
 
     prompt = f"""
-You are a concise study assistant.
+You are an AI college study assistant.
 
-Summarize the following PDF content.
+Create a clear and useful summary of the
+following study material.
 
-Focus only on:
-- main ideas
-- important concepts
-- definitions
-- important facts
-- formulas
-- technical details
+Requirements:
 
-Remove repetition.
+- Use ONLY the provided document.
+- Do not invent information.
+- Include the main concepts.
+- Include important definitions.
+- Include important facts.
+- Use headings and bullet points.
+- Make the summary useful for exam preparation.
+- Do not mention information outside the document.
 
-Do not invent information.
+DOCUMENT:
 
-Use short headings and bullet points.
-
-Keep the summary concise.
-
-PDF CONTENT:
-
-{text}
+{context}
 
 SUMMARY:
 """
 
-    return ask_ollama(
-        prompt,
-        SECTION_TOKENS,
-    )
+    try:
 
-
-# ============================================================
-# FINAL SUMMARY
-# ============================================================
-
-def create_final_summary(
-    summaries,
-):
-
-    if not summaries:
-        return ""
-
-    combined = "\n\n".join(
-        summaries
-    )
-
-    prompt = f"""
-Create a concise study guide from
-the following section summaries.
-
-Use:
-
-# Overview
-
-# Main Topics
-
-# Important Concepts
-
-# Important Definitions
-
-# Important Facts
-
-# Key Takeaways
-
-Rules:
-- Remove duplicate information.
-- Keep important technical details.
-- Do not invent information.
-- Keep it concise.
-- Make it useful for exam revision.
-
-SECTION SUMMARIES:
-
-{combined}
-
-FINAL STUDY GUIDE:
-"""
-
-    return ask_ollama(
-        prompt,
-        FINAL_TOKENS,
-    )
-
-
-# ============================================================
-# MAIN PDF SUMMARIZER
-# ============================================================
-
-def summarize_pdf(documents):
-
-    if not documents:
-
-        return "No PDF content was found."
-
-    # --------------------------------------------------------
-    # Remove empty documents
-    # --------------------------------------------------------
-
-    documents = [
-        document
-        for document in documents
-        if document.get(
-            "text",
-            "",
-        ).strip()
-    ]
-
-    if not documents:
-
-        return (
-            "No readable text was found "
-            "in this PDF."
+        response = requests.post(
+            OLLAMA_URL,
+            headers={
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MODEL_NAME,
+                "prompt": prompt,
+                "stream": False,
+            },
+            timeout=180,
         )
 
-    # --------------------------------------------------------
-    # Check Ollama
-    # --------------------------------------------------------
+    except requests.exceptions.Timeout:
 
-    ok, error = check_ollama()
-
-    if not ok:
-
-        raise RuntimeError(error)
-
-    # --------------------------------------------------------
-    # SMALL PDF
-    #
-    # One request instead of multiple requests.
-    # --------------------------------------------------------
-
-    if len(documents) <= SMALL_PDF_PAGES:
-
-        return summarize_section(
-            documents
+        raise RuntimeError(
+            "Summary generation timed out."
         )
 
-    # --------------------------------------------------------
-    # LARGE PDF
-    # --------------------------------------------------------
+    except requests.exceptions.ConnectionError:
 
-    batches = []
-
-    for i in range(
-        0,
-        len(documents),
-        LARGE_BATCH_SIZE,
-    ):
-
-        batch = documents[
-            i:i + LARGE_BATCH_SIZE
-        ]
-
-        batches.append(batch)
-
-    section_summaries = []
-
-    # --------------------------------------------------------
-    # Summarize sections
-    # --------------------------------------------------------
-
-    for batch in batches:
-
-        summary = summarize_section(
-            batch
+        raise RuntimeError(
+            "Could not connect to Ollama Cloud."
         )
 
-        if summary:
+    except requests.exceptions.RequestException as error:
 
-            section_summaries.append(
-                summary
-            )
-
-    if not section_summaries:
-
-        return (
-            "The model did not generate "
-            "a summary."
+        raise RuntimeError(
+            f"Ollama request failed: {error}"
         )
 
-    # --------------------------------------------------------
-    # Only one section
-    # --------------------------------------------------------
+    if response.status_code != 200:
 
-    if len(section_summaries) == 1:
+        raise RuntimeError(
+            f"Ollama API error "
+            f"{response.status_code}:\n"
+            f"{response.text}"
+        )
 
-        return section_summaries[0]
+    try:
 
-    # --------------------------------------------------------
-    # Final consolidation
-    # --------------------------------------------------------
+        result = response.json()
 
-    return create_final_summary(
-        section_summaries
-    )
+    except ValueError:
+
+        raise RuntimeError(
+            "Ollama returned invalid JSON."
+        )
+
+    if "error" in result:
+
+        raise RuntimeError(
+            f"Ollama error: {result['error']}"
+        )
+
+    summary = result.get(
+        "response",
+        ""
+    ).strip()
+
+    if not summary:
+
+        raise RuntimeError(
+            "Ollama returned an empty summary."
+        )
+
+    return summary
