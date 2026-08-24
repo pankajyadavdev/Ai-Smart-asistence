@@ -1,6 +1,8 @@
 streamlit
 pypdf
 sentence-transformers
+torch
+torchvision
 faiss-cpu
 numpy
 requests
