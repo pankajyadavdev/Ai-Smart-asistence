@@ -1,4 +1,5 @@
 # Ai-Smart-asistence
+📚 AI College Study Assistant using RAG, FAISS, Streamlit and Ollama for PDF Q&A, summarization, exam question generation, Quiz Mode, and downloadable study materials. Optimized for both local development and Streamlit Cloud deployment.
 this project is for my college which comes under the minor project 
 The application was initially developed and tested successfully in a local environment using Ollama and Llama 3.2:3b.
 
