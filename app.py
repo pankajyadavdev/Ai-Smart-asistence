@@ -142,6 +142,100 @@ def build_context(documents):
     )
 
 
+
+# ============================================================
+# WHOLE PDF SUMMARY
+# ============================================================
+
+def generate_full_pdf_summary(documents, max_chars_per_part=18000):
+    """Summarize every extracted chunk/page in multiple passes.
+
+    This avoids sending a 90+ page document to the LLM in one request.
+    """
+    if not documents:
+        raise ValueError("No document content available.")
+
+    parts = []
+    current = []
+    current_len = 0
+
+    for doc in documents:
+        text_part = str(doc.get("text", "")).strip()
+        if not text_part:
+            continue
+
+        item = (
+            f"SOURCE: {doc.get('source', '')}\n"
+            f"PAGE: {doc.get('page', 1)}\n"
+            f"{text_part}"
+        )
+
+        if current and current_len + len(item) > max_chars_per_part:
+            parts.append("\n\n".join(current))
+            current = []
+            current_len = 0
+
+        current.append(item)
+        current_len += len(item)
+
+    if current:
+        parts.append("\n\n".join(current))
+
+    if not parts:
+        raise ValueError("The PDF contains no extractable text.")
+
+    partial_summaries = []
+
+    for i, part in enumerate(parts, 1):
+        prompt = f"""
+Create a detailed study summary of PART {i} of {len(parts)} from the student's PDF.
+
+Rules:
+- Use ONLY the information provided below.
+- Cover all important definitions, concepts, explanations, examples, lists,
+  formulas, steps, and conclusions present in this part.
+- Keep important technical terms.
+- Do not invent information.
+- Organize the result with clear headings and bullet points.
+- This is an intermediate summary; do not omit important information just to
+  make it short.
+
+DOCUMENT PART:
+{part}
+"""
+        partial_summaries.append(generate_answer(
+            prompt,
+            part
+        ))
+
+    if len(partial_summaries) == 1:
+        return partial_summaries[0]
+
+    combined = "\n\n".join(
+        f"SECTION SUMMARY {i}:\n{s}"
+        for i, s in enumerate(partial_summaries, 1)
+    )
+
+    final_prompt = f"""
+Create one complete study summary by combining all the section summaries below.
+
+Rules:
+- Use ONLY the supplied section summaries.
+- Preserve all important information from every section.
+- Remove repetition where appropriate.
+- Keep technical definitions, important points, examples, formulas, steps,
+  and conclusions.
+- Organize the final result with headings and bullet points.
+- Do not mention that the text was processed in sections.
+- Do not invent information.
+
+SECTION SUMMARIES:
+{combined}
+"""
+
+    return generate_answer(final_prompt, combined)
+
+
 # ============================================================
 # HEADER
 # ============================================================
@@ -204,6 +298,22 @@ with st.sidebar:
             st.exception(e)
 
     # ========================================================
+    # STUDY STATISTICS
+    # ========================================================
+    st.divider()
+    st.header("📊 Study Statistics")
+
+    st.metric(
+        "Knowledge Chunks",
+        len(st.session_state.chunks)
+    )
+
+    if st.session_state.files:
+        st.caption(
+            f"📚 {len(st.session_state.files)} PDF(s) currently loaded"
+        )
+
+    # ========================================================
     # SUMMARY
     # ========================================================
 
@@ -218,8 +328,23 @@ with st.sidebar:
             key="summary_select",
         )
 
+        selected_docs = [
+            x for x in st.session_state.chunks
+            if x["source"] == summary_file
+        ]
+        page_numbers = sorted({
+            int(x.get("page", 1))
+            for x in selected_docs
+            if str(x.get("page", "")).isdigit()
+        })
+
+        st.caption(
+            f"📄 {len(page_numbers)} pages detected • "
+            f"{len(selected_docs)} text chunks will be processed"
+        )
+
         if st.button(
-            "✨ Generate Summary",
+            "✨ Generate Full PDF Summary",
             use_container_width=True,
         ):
 
@@ -231,7 +356,7 @@ with st.sidebar:
 
             try:
                 with st.spinner("Generating summary..."):
-                    st.session_state.summary = summarize_pdf(docs)
+                    st.session_state.summary = generate_full_pdf_summary(docs)
                     st.session_state.summary_file = summary_file
 
                 st.success("Summary generated.")
