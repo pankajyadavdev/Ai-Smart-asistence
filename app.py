@@ -1,4 +1,4 @@
-
+import base64
 from pathlib import Path
 
 import streamlit as st
@@ -135,12 +135,9 @@ def show_pdf(source, page):
 
 def build_context(documents):
     return "\n\n".join(
-        f"""
-SOURCE: {doc['source']}
-PAGE: {doc['page']}
-
-{doc['text']}
-"""
+        f"SOURCE: {doc['source']}\\n"
+        f"PAGE: {doc['page']}\\n\\n"
+        f"{doc['text']}"
         for doc in documents
     )
 
@@ -722,3 +719,4 @@ if question:
             "role": "assistant",
             "content": answer,
         }
+    )
