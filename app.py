@@ -27,7 +27,7 @@ from utils.downloader import (
 
 st.set_page_config(
     page_title="AI Study Assistant",
-    page_icon="📚",
+    page_icon="🎓",
     layout="wide",
 )
 
@@ -223,7 +223,7 @@ SECTION SUMMARIES:
 # HEADER
 # ============================================================
 
-st.title("📚 AI Study Assistant")
+st.title("🎓 AI Study Assistant")
 st.caption(
     "Upload PDFs, ask questions, generate exams, "
     "take quizzes, and download questions."
@@ -293,7 +293,7 @@ with st.sidebar:
 
     if st.session_state.files:
         st.caption(
-            f"📚 {len(st.session_state.files)} PDF(s) currently loaded"
+            f"🎓 {len(st.session_state.files)} PDF(s) currently loaded"
         )
 
     # ========================================================
@@ -377,7 +377,7 @@ with st.sidebar:
 
         qtype = st.selectbox(
             "Type",
-            ["MCQ", "Short Answer"],
+            ["MCQ", "Short Answer",Long Answer],
         )
 
         if st.button(
@@ -524,7 +524,7 @@ if st.session_state.questions:
 
     with c3:
         st.download_button(
-            "📚 Both",
+            "🎓 Both",
             text_to_bytes(combined_text),
             "questions_answers.txt",
             "text/plain",
@@ -768,7 +768,7 @@ if question:
                     context = build_context(results)
 
                     with st.spinner(
-                        "🤖 Generating answer..."
+                        " Generating answer..."
                     ):
 
                         answer = generate_answer(
@@ -779,7 +779,7 @@ if question:
                     st.markdown(answer)
 
                     st.divider()
-                    st.subheader("📚 Sources")
+                    st.subheader("🎓 Sources")
 
                     seen = set()
 
