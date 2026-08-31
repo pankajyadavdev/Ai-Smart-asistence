@@ -1,241 +1,162 @@
-import streamlit as st
-import hashlib
-import hmac
-import sqlite3
-from pathlib import Path
-from datetime import datetime
 
+from pathlib import Path
+
+import streamlit as st
+import streamlit.components.v1 as components
 
 from utils.pdf_loader import extract_pages_from_pdf
 from utils.chunker import split_pages_into_chunks
 from utils.embeddings import create_embeddings, create_query_embedding
 from utils.vector_store import create_vector_store, search_vector_store
 from utils.rag_pipeline import generate_answer
+from utils.summarizer import summarize_pdf
 
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
-st.set_page_config(
-    page_title="AI College Assistant",
-    page_icon="🎓",
-    layout="wide"
+from utils.question_generator import generate_questions
+from utils.quiz_manager import calculate_score
+from utils.downloader import (
+    create_questions_text,
+    create_answer_key,
+    create_questions_and_answers,
+    text_to_bytes,
 )
 
 
 # ============================================================
-# TITLE
+# CONFIG
 # ============================================================
 
-st.title("🎓 AI College Assistant")
+st.set_page_config(
+    page_title="AI Study Assistant",
+    page_icon="📚",
+    layout="wide",
+)
 
-st.caption("PDF RAG Study Assistant • Student Login & Dashboard")
+PDF_DIR = Path("uploaded_pdfs")
+PDF_DIR.mkdir(exist_ok=True)
 
-st.divider()
-
-
-# ============================================================
-# LOGIN / SIGNUP DATABASE
-# ============================================================
-
-DB_PATH = Path(__file__).resolve().parent / "users.db"
-
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            full_name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
-            student_id TEXT NOT NULL, college TEXT NOT NULL,
-            course TEXT NOT NULL, semester TEXT NOT NULL,
-            password_hash TEXT NOT NULL, created_at TEXT NOT NULL
-        )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS activity (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-            activity_type TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL
-        )""")
-
-def hash_password(password):
-    salt = hashlib.sha256(password.encode()).hexdigest()[:32]
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120000).hex()
-    return f"{salt}${digest}"
-
-def verify_password(password, stored):
-    try:
-        salt, saved = stored.split("$", 1)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120000).hex()
-        return hmac.compare_digest(digest, saved)
-    except Exception:
-        return False
-
-def create_user(name, email, student_id, college, course, semester, password):
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""INSERT INTO users
-                (full_name,email,student_id,college,course,semester,password_hash,created_at)
-                VALUES (?,?,?,?,?,?,?,?)""",
-                (name.strip(), email.strip().lower(), student_id.strip(), college.strip(),
-                 course.strip(), semester, hash_password(password),
-                 datetime.now().isoformat(timespec="seconds")))
-            conn.commit()
-        return True, "Account created successfully. Please log in."
-    except sqlite3.IntegrityError:
-        return False, "An account with this email already exists."
-    except Exception as e:
-        return False, str(e)
-
-def authenticate(email, password):
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute("""SELECT id,full_name,email,student_id,college,course,semester,password_hash,created_at
-                             FROM users WHERE email=?""", (email.strip().lower(),)).fetchone()
-    if not row or not verify_password(password, row[7]):
-        return None
-    return {"id":row[0],"full_name":row[1],"email":row[2],"student_id":row[3],
-            "college":row[4],"course":row[5],"semester":row[6],"created_at":row[8]}
-
-def log_activity(user_id, kind, details=""):
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT INTO activity(user_id,activity_type,details,created_at) VALUES(?,?,?,?)",
-                         (user_id, kind, details[:250], datetime.now().isoformat(timespec="seconds")))
-            conn.commit()
-    except Exception:
-        pass
-
-def activity_count(user_id, kind):
-    with sqlite3.connect(DB_PATH) as conn:
-        return conn.execute("SELECT COUNT(*) FROM activity WHERE user_id=? AND activity_type=?",
-                            (user_id, kind)).fetchone()[0]
-
-def recent_activity(user_id):
-    with sqlite3.connect(DB_PATH) as conn:
-        return conn.execute("SELECT activity_type,details,created_at FROM activity WHERE user_id=? ORDER BY id DESC LIMIT 8",
-                            (user_id,)).fetchall()
-
-init_db()
-
-# ============================================================
-# LOGIN PAGE
-# ============================================================
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-def show_auth_page():
-    st.markdown("<h1 style='text-align:center'>🎓 AI College Study Assistant</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;color:gray'>Login or create a student account to continue</p>", unsafe_allow_html=True)
-    left, center, right = st.columns([1, 2, 1])
-    with center:
-        login_tab, signup_tab = st.tabs(["🔐 Login", "📝 Sign Up"])
-        with login_tab:
-            email = st.text_input("Email", key="auth_login_email")
-            password = st.text_input("Password", type="password", key="auth_login_password")
-            if st.button("Login", type="primary", use_container_width=True):
-                if not email or not password:
-                    st.warning("Please enter email and password.")
-                else:
-                    user = authenticate(email, password)
-                    if user:
-                        st.session_state.authenticated = True
-                        st.session_state.user = user
-                        log_activity(user["id"], "login", "User logged in")
-                        st.rerun()
-                    else:
-                        st.error("Invalid email or password.")
-        with signup_tab:
-            name = st.text_input("Full Name", key="auth_name")
-            email = st.text_input("Email", key="auth_signup_email")
-            student_id = st.text_input("Student ID / Roll Number", key="auth_student_id")
-            college = st.text_input("College Name", key="auth_college")
-            course = st.text_input("Course / Branch", key="auth_course")
-            semester = st.selectbox("Semester", [f"{i}th" for i in range(1,9)], key="auth_semester")
-            password = st.text_input("Password", type="password", key="auth_signup_password")
-            confirm = st.text_input("Confirm Password", type="password", key="auth_confirm_password")
-            if st.button("Create Account", type="primary", use_container_width=True):
-                if not all([name,email,student_id,college,course,password,confirm]):
-                    st.warning("Please fill in all fields.")
-                elif password != confirm:
-                    st.error("Passwords do not match.")
-                elif len(password) < 6:
-                    st.error("Password must contain at least 6 characters.")
-                else:
-                    ok,msg=create_user(name,email,student_id,college,course,semester,password)
-                    if ok: st.success(msg)
-                    else: st.error(msg)
-
-if not st.session_state.authenticated:
-    show_auth_page()
-    st.stop()
-
-current_user = st.session_state.user
 
 # ============================================================
 # SESSION STATE
 # ============================================================
 
-if "chunks" not in st.session_state:
-    st.session_state.chunks = []
+defaults = {
+    "chunks": [],
+    "index": None,
+    "messages": [],
+    "files": [],
+    "summary": None,
+    "summary_file": None,
+    "viewer_file": None,
+    "viewer_page": 1,
+    "questions": [],
+    "question_file": None,
+    "quiz_result": None,
+}
 
-if "index" not in st.session_state:
-    st.session_state.index = None
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "file_name" not in st.session_state:
-    st.session_state.file_name = ""
-
-if "pdf_processed" not in st.session_state:
-    st.session_state.pdf_processed = False
-
-if "page" not in st.session_state:
-    st.session_state.page = "Study Assistant"
 
 # ============================================================
-# STUDENT DASHBOARD
+# FUNCTIONS
 # ============================================================
 
-if st.session_state.page == "Dashboard":
-    st.header("📊 Student Dashboard")
-    st.caption("Your saved student profile and study activity")
+def save_pdf(file):
+    path = PDF_DIR / file.name
+    path.write_bytes(file.getbuffer())
+    return path
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Questions", activity_count(current_user["id"], "question"))
-    c2.metric("PDF Uploads", activity_count(current_user["id"], "upload"))
-    c3.metric("Exam Questions", activity_count(current_user["id"], "exam_question"))
-    c4.metric("Quizzes", activity_count(current_user["id"], "quiz"))
 
-    st.divider()
-    left, right = st.columns(2)
+def process_pdf(file):
+    pages = extract_pages_from_pdf(file)
 
-    with left:
-        st.subheader("👤 Student Details")
-        st.write(f"**Name:** {current_user['full_name']}")
-        st.write(f"**Email:** {current_user['email']}")
-        st.write(f"**Student ID:** {current_user['student_id']}")
-        st.write(f"**College:** {current_user['college']}")
-        st.write(f"**Course:** {current_user['course']}")
-        st.write(f"**Semester:** {current_user['semester']}")
-        st.write(f"**Account Created:** {current_user['created_at']}")
+    if not pages:
+        raise ValueError("Could not extract text from PDF.")
 
-    with right:
-        st.subheader("🕒 Recent Activity")
-        rows = recent_activity(current_user["id"])
-        if rows:
-            for kind, details, created in rows:
-                st.write(f"**{kind.replace('_', ' ').title()}** — {details}")
-                st.caption(created)
-        else:
-            st.info("No activity yet.")
+    chunks = split_pages_into_chunks(pages)
 
-    st.divider()
-    st.success("🔐 Your student details are stored locally in users.db.")
+    if not chunks:
+        raise ValueError("Could not create PDF chunks.")
 
-    if st.button("💬 Go to Study Assistant", type="primary"):
-        st.session_state.page = "Study Assistant"
-        st.rerun()
+    return [
+        {
+            "source": file.name,
+            "page": chunk.get("page", 1),
+            "text": chunk.get("text", ""),
+        }
+        for chunk in chunks
+    ]
+
+
+def rebuild_index(documents):
+    texts = [x["text"] for x in documents if x.get("text")]
+
+    if not texts:
+        raise ValueError("No text available.")
+
+    embeddings = create_embeddings(texts)
+    return create_vector_store(embeddings)
+
+
+def open_source(source, page):
+    st.session_state.viewer_file = source
+    st.session_state.viewer_page = int(page)
+    st.rerun()
+
+
+def show_pdf(source, page):
+    path = PDF_DIR / source
+
+    if not path.exists():
+        st.error("PDF not found.")
+        return
+
+    data = base64.b64encode(path.read_bytes()).decode()
+
+    url = (
+        "data:application/pdf;base64,"
+        + data
+        + f"#page={page}"
+    )
+
+    components.html(
+        f"""
+        <iframe
+            src="{url}"
+            width="100%"
+            height="700"
+            style="border:1px solid #ddd;border-radius:10px;">
+        </iframe>
+        """,
+        height=720,
+    )
+
+
+def build_context(documents):
+    return "\n\n".join(
+        f"""
+SOURCE: {doc['source']}
+PAGE: {doc['page']}
+
+{doc['text']}
+"""
+        for doc in documents
+    )
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.title("📚 AI Study Assistant")
+st.caption(
+    "Upload PDFs, ask questions, generate exams, "
+    "take quizzes, and download questions."
+)
+
+st.divider()
+
 
 # ============================================================
 # SIDEBAR
@@ -243,380 +164,561 @@ if st.session_state.page == "Dashboard":
 
 with st.sidebar:
 
-    st.header("🎓 Student Panel")
-    st.write(f"**{current_user['full_name']}**")
-    st.caption(f"{current_user['course']} • {current_user['semester']}")
+    st.header("📄 Study Material")
 
-    st.divider()
-    st.subheader("🧭 Navigation")
-    st.session_state.page = st.radio(
-        "Go to",
-        ["Dashboard", "Study Assistant"],
-        index=0 if st.session_state.page == "Dashboard" else 1,
-        label_visibility="collapsed"
-    )
-
-    if st.button("🚪 Logout", use_container_width=True):
-        log_activity(current_user["id"], "logout", "User logged out")
-        st.session_state.authenticated = False
-        st.session_state.user = None
-        st.rerun()
-
-    st.divider()
-    st.subheader("📄 Add Study Material")
-
-    st.divider()
-
-    uploaded_file = st.file_uploader(
+    uploaded = st.file_uploader(
         "Upload PDF",
-        type=["pdf"]
+        type=["pdf"],
     )
 
-    if uploaded_file is not None:
+    if uploaded and st.button(
+        "➕ Add PDF",
+        type="primary",
+        use_container_width=True,
+    ):
 
-        if st.button(
-            "📖 Add PDF to Knowledge Base",
-            use_container_width=True
-        ):
+        try:
+            with st.spinner("Processing PDF..."):
 
-            # ------------------------------------------------
-            # EXTRACT PDF
-            # ------------------------------------------------
+                save_pdf(uploaded)
 
-            with st.spinner("Reading PDF..."):
+                new_docs = process_pdf(uploaded)
 
-                pages = extract_pages_from_pdf(
-                    uploaded_file
-                )
-
-            if not pages:
-
-                st.error(
-                    "Could not extract text from PDF."
-                )
-
-                st.stop()
-
-            # ------------------------------------------------
-            # CHUNK PDF
-            # ------------------------------------------------
-
-            with st.spinner("Creating PDF chunks..."):
-
-                pdf_chunks = split_pages_into_chunks(
-                    pages
-                )
-
-            # ------------------------------------------------
-            # FORMAT PDF DOCUMENTS
-            # ------------------------------------------------
-
-            pdf_documents = []
-
-            for chunk in pdf_chunks:
-
-                pdf_documents.append(
-                    {
-                        "source": uploaded_file.name,
-                        "page": chunk["page"],
-                        "text": chunk["text"]
-                    }
-                )
-
-            # ------------------------------------------------
-            # KEEP ONLY USER PDF KNOWLEDGE
-            # ------------------------------------------------
-
-            all_documents = pdf_documents
-
-            # ------------------------------------------------
-            # EMBEDDINGS
-            # ------------------------------------------------
-
-            with st.spinner(
-                "Creating embeddings..."
-            ):
-
-                all_texts = [
-                    document["text"]
-                    for document in all_documents
+                old_docs = [
+                    x
+                    for x in st.session_state.chunks
+                    if x["source"] != uploaded.name
                 ]
 
-                embeddings = create_embeddings(
-                    all_texts
-                )
+                documents = old_docs + new_docs
 
-            # ------------------------------------------------
-            # VECTOR INDEX
-            # ------------------------------------------------
+                index = rebuild_index(documents)
 
-            with st.spinner(
-                "Updating knowledge base..."
-            ):
+                st.session_state.chunks = documents
+                st.session_state.index = index
 
-                index = create_vector_store(
-                    embeddings
-                )
+                if uploaded.name not in st.session_state.files:
+                    st.session_state.files.append(uploaded.name)
 
-            st.session_state.chunks = all_documents
-            st.session_state.index = index
-            st.session_state.file_name = uploaded_file.name
-            st.session_state.pdf_processed = True
+            st.success("✅ PDF added.")
 
-            st.success(
-                "✅ PDF added to knowledge base!"
-            )
-            log_activity(
-                current_user["id"],
-                "upload",
-                uploaded_file.name
-            )
+        except Exception as e:
+            st.error("PDF processing failed.")
+            st.exception(e)
 
-            st.rerun()
-
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
+    # ========================================================
+    # SUMMARY
+    # ========================================================
 
     st.divider()
+    st.header("📝 Summary")
 
-    st.subheader("📊 Status")
+    if st.session_state.files:
 
-    st.write(
-        f"📚 Knowledge sections: "
-        f"{len(st.session_state.chunks)}"
-    )
-
-    st.write(
-        f"💬 Questions asked: "
-        f"{activity_count(current_user['id'], 'question')}"
-    )
-
-    if st.session_state.pdf_processed:
-
-        st.write(
-            f"📄 PDF: "
-            f"{st.session_state.file_name}"
+        summary_file = st.selectbox(
+            "PDF",
+            st.session_state.files,
+            key="summary_select",
         )
 
+        if st.button(
+            "✨ Generate Summary",
+            use_container_width=True,
+        ):
+
+            docs = [
+                x
+                for x in st.session_state.chunks
+                if x["source"] == summary_file
+            ]
+
+            try:
+                with st.spinner("Generating summary..."):
+                    st.session_state.summary = summarize_pdf(docs)
+                    st.session_state.summary_file = summary_file
+
+                st.success("Summary generated.")
+
+            except Exception as e:
+                st.error("Summary failed.")
+                st.exception(e)
+
+    # ========================================================
+    # EXAM GENERATOR
+    # ========================================================
+
+    st.divider()
+    st.header("📝 Exam Generator")
+
+    if st.session_state.files:
+
+        exam_file = st.selectbox(
+            "Study Material",
+            st.session_state.files,
+            key="exam_select",
+        )
+
+        count = st.slider(
+            "Questions",
+            1,
+            20,
+            5,
+        )
+
+        difficulty = st.selectbox(
+            "Difficulty",
+            ["Easy", "Medium", "Hard"],
+        )
+
+        qtype = st.selectbox(
+            "Type",
+            ["MCQ", "Short Answer"],
+        )
+
+        if st.button(
+            "🚀 Generate Exam",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            docs = [
+                x
+                for x in st.session_state.chunks
+                if x["source"] == exam_file
+            ]
+
+            context = build_context(docs)
+
+            try:
+                with st.spinner("Generating questions..."):
+
+                    questions = generate_questions(
+                        context,
+                        num_questions=count,
+                        difficulty=difficulty,
+                        question_type=qtype,
+                    )
+
+                st.session_state.questions = questions
+                st.session_state.question_file = exam_file
+                st.session_state.quiz_result = None
+
+                st.success(
+                    f"Generated {len(questions)} questions."
+                )
+
+            except Exception as e:
+                st.error("Question generation failed.")
+                st.exception(e)
+
+    # ========================================================
+    # STATUS
+    # ========================================================
+
     st.divider()
 
+    st.write(
+        f"📄 PDFs: {len(st.session_state.files)}"
+    )
+
+    st.write(
+        f"🧩 Chunks: {len(st.session_state.chunks)}"
+    )
+
     if st.button(
-        "🗑️ Clear Chat",
-        use_container_width=True
+        "🗑️ Clear Knowledge Base",
+        use_container_width=True,
+    ):
+
+        for key in [
+            "chunks",
+            "files",
+            "questions",
+            "summary",
+        ]:
+            st.session_state[key] = []
+
+        st.session_state.index = None
+        st.session_state.question_file = None
+        st.session_state.summary_file = None
+
+        st.rerun()
+
+    if st.button(
+        "💬 Clear Chat",
+        use_container_width=True,
     ):
 
         st.session_state.messages = []
-
         st.rerun()
 
 
-if st.session_state.page == "Study Assistant":
+# ============================================================
+# SUMMARY DISPLAY
+# ============================================================
 
-    # ============================================================
-    # WELCOME
-    # ============================================================
+if st.session_state.summary:
 
-    if not st.session_state.messages:
+    st.divider()
 
-        st.info(
-            "Upload your study PDFs from the sidebar, then ask questions "
-            "from the uploaded material."
-        )
-
-
-    # ============================================================
-    # CHAT HISTORY
-    # ============================================================
-
-    for message in st.session_state.messages:
-
-        with st.chat_message(message["role"]):
-
-            st.write(message["content"])
-
-
-    # ============================================================
-    # CHAT INPUT
-    # ============================================================
-
-    question = st.chat_input(
-        "💬 Ask a question about your uploaded PDFs..."
+    st.subheader(
+        f"📝 Summary — {st.session_state.summary_file}"
     )
 
+    st.markdown(st.session_state.summary)
 
-    # ============================================================
-    # QUESTION PROCESSING
-    # ============================================================
+    if st.button("✕ Close Summary"):
+        st.session_state.summary = None
+        st.session_state.summary_file = None
+        st.rerun()
 
-    if question:
 
-        # --------------------------------------------------------
-        # SHOW USER MESSAGE
-        # --------------------------------------------------------
+# ============================================================
+# EXAM + DOWNLOAD + QUIZ
+# ============================================================
 
-        with st.chat_message("user"):
+if st.session_state.questions:
 
-            st.write(question)
+    questions = st.session_state.questions
 
-        st.session_state.messages.append(
-            {
-                "role": "user",
-                "content": question
-            }
+    st.divider()
+
+    st.header(
+        f"📝 Exam — {st.session_state.question_file}"
+    )
+
+    # --------------------------------------------------------
+    # DOWNLOAD
+    # --------------------------------------------------------
+
+    st.subheader("📥 Download Questions / Answers")
+
+    questions_text = create_questions_text(questions)
+    answers_text = create_answer_key(questions)
+    combined_text = create_questions_and_answers(questions)
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.download_button(
+            "📄 Questions",
+            text_to_bytes(questions_text),
+            "questions.txt",
+            "text/plain",
+            use_container_width=True,
         )
 
-        # --------------------------------------------------------
-        # RAG SEARCH
-        # --------------------------------------------------------
+    with c2:
+        st.download_button(
+            "✅ Answers",
+            text_to_bytes(answers_text),
+            "answers.txt",
+            "text/plain",
+            use_container_width=True,
+        )
 
+    with c3:
+        st.download_button(
+            "📚 Both",
+            text_to_bytes(combined_text),
+            "questions_answers.txt",
+            "text/plain",
+            use_container_width=True,
+        )
+
+    # --------------------------------------------------------
+    # QUESTIONS
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader("📋 Generated Questions")
+
+    for i, q in enumerate(questions, 1):
+
+        st.markdown(
+            f"### {i}. {q.get('question', '')}"
+        )
+
+        options = q.get("options", [])
+
+        for n, option in enumerate(options):
+            st.write(
+                f"**{chr(65 + n)}.** {option}"
+            )
+
+        with st.expander("💡 Show Answer"):
+            st.write(
+                f"**Answer:** {q.get('answer', '')}"
+            )
+
+            if q.get("explanation"):
+                st.write(
+                    f"**Explanation:** "
+                    f"{q['explanation']}"
+                )
+
+        if q.get("source"):
+            st.caption(
+                f"📄 {q['source']} "
+                f"• Page {q.get('page', '')}"
+            )
+
+    # --------------------------------------------------------
+    # QUIZ MODE
+    # --------------------------------------------------------
+
+    st.divider()
+    st.header("🎯 Quiz Mode")
+
+    if st.session_state.quiz_result is None:
+
+        with st.form("quiz_form"):
+
+            user_answers = {}
+
+            for i, q in enumerate(questions):
+
+                st.markdown(
+                    f"### Question {i + 1}"
+                )
+
+                st.write(
+                    q.get("question", "")
+                )
+
+                options = q.get("options", [])
+
+                if options:
+
+                    user_answers[i] = st.radio(
+                        "Select answer",
+                        options,
+                        key=f"quiz_{i}",
+                        index=None,
+                    )
+
+                else:
+
+                    user_answers[i] = st.text_input(
+                        "Your answer",
+                        key=f"quiz_{i}",
+                    )
+
+            submitted = st.form_submit_button(
+                "✅ Submit Quiz",
+                use_container_width=True,
+            )
+
+        if submitted:
+
+            result = calculate_score(
+                questions,
+                user_answers,
+            )
+
+            st.session_state.quiz_result = result
+            st.rerun()
+
+    else:
+
+        result = st.session_state.quiz_result
+
+        st.success(
+            f"🎉 Score: {result['percentage']}%"
+        )
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric("Correct", result["correct"])
+        c2.metric("Wrong", result["wrong"])
+        c3.metric("Total", result["total"])
+
+        st.subheader("📋 Quiz Review")
+
+        for i, item in enumerate(
+            result["results"],
+            1,
+        ):
+
+            if item["is_correct"]:
+                st.success(
+                    f"Question {i} — Correct ✅"
+                )
+            else:
+                st.error(
+                    f"Question {i} — Wrong ❌"
+                )
+
+            st.write(item["question"])
+
+            st.write(
+                f"Your answer: "
+                f"{item['user_answer']}"
+            )
+
+            st.write(
+                f"Correct answer: "
+                f"{item['correct_answer']}"
+            )
+
+        if st.button(
+            "🔄 Retake Quiz",
+            use_container_width=True,
+        ):
+
+            st.session_state.quiz_result = None
+            st.rerun()
+
+
+# ============================================================
+# PDF VIEWER
+# ============================================================
+
+if st.session_state.viewer_file:
+
+    st.divider()
+
+    st.subheader("📖 Source Document")
+
+    st.caption(
+        f"{st.session_state.viewer_file} "
+        f"• Page {st.session_state.viewer_page}"
+    )
+
+    show_pdf(
+        st.session_state.viewer_file,
+        st.session_state.viewer_page,
+    )
+
+    if st.button("✕ Close Document"):
+        st.session_state.viewer_file = None
+        st.rerun()
+
+
+# ============================================================
+# CHAT HISTORY
+# ============================================================
+
+for message in st.session_state.messages:
+
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+
+# ============================================================
+# CHAT INPUT
+# ============================================================
+
+question = st.chat_input(
+    "💬 Ask a question about your PDFs..."
+)
+
+if question:
+
+    st.session_state.messages.append(
+        {
+            "role": "user",
+            "content": question,
+        }
+    )
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
 
         if st.session_state.index is None:
 
-            st.error(
-                "Knowledge base is not ready."
-            )
+            answer = "📄 Please upload a PDF first."
+            st.warning(answer)
 
-            st.stop()
+        else:
 
-        with st.chat_message("assistant"):
+            try:
 
-            with st.spinner(
-                "🔎 Searching knowledge base..."
-            ):
+                with st.spinner("🔎 Searching documents..."):
 
-                query_embedding = (
-                    create_query_embedding(
-                        question
-                    )
-                )
-
-                results = search_vector_store(
-                    st.session_state.index,
-                    query_embedding,
-                    st.session_state.chunks,
-                    top_k=5
-                )
-
-            if not results:
-
-                answer = (
-                    "I could not find relevant "
-                    "information in the current "
-                    "knowledge base."
-                )
-
-                st.warning(answer)
-
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": answer
-                    }
-                )
-
-            else:
-
-                # --------------------------------------------
-                # BUILD CONTEXT
-                # --------------------------------------------
-
-                context_parts = []
-
-                for result in results:
-
-                    context_parts.append(
-                        f"""
-SOURCE:
-{result["source"]}
-
-SECTION / PAGE:
-{result["page"]}
-
-CONTENT:
-{result["text"]}
-"""
+                    query_embedding = (
+                        create_query_embedding(question)
                     )
 
-                context = "\n\n".join(
-                    context_parts
-                )
-
-                # --------------------------------------------
-                # GENERATE ANSWER
-                # --------------------------------------------
-
-                with st.spinner(
-                    "🤖 Granite 4.1:3B is thinking..."
-                ):
-
-                    answer = generate_answer(
-                        question,
-                        context
+                    results = search_vector_store(
+                        st.session_state.index,
+                        query_embedding,
+                        st.session_state.chunks,
+                        top_k=3,
                     )
 
-                st.markdown(answer)
+                if not results:
 
-                # --------------------------------------------
-                # SOURCES
-                # --------------------------------------------
-
-                st.divider()
-
-                st.subheader("📚 Sources")
-
-                displayed = set()
-
-                for result in results:
-
-                    key = (
-                        result["source"],
-                        result["page"]
+                    answer = (
+                        "I couldn't find relevant "
+                        "information in your PDFs."
                     )
 
-                    if key in displayed:
-                        continue
+                    st.warning(answer)
 
-                    displayed.add(key)
+                else:
 
-                    st.markdown(
-                        f"📄 **{result['source']} — "
-                        f"Page {result['page']}**"
-                    )
+                    context = build_context(results)
 
-                # --------------------------------------------
-                # RETRIEVED INFORMATION
-                # --------------------------------------------
+                    with st.spinner(
+                        "🤖 Generating answer..."
+                    ):
 
-                with st.expander(
-                    "🔎 View Retrieved Information"
-                ):
+                        answer = generate_answer(
+                            question,
+                            context,
+                        )
+
+                    st.markdown(answer)
+
+                    st.divider()
+                    st.subheader("📚 Sources")
+
+                    seen = set()
 
                     for i, result in enumerate(results):
 
-                        st.markdown(
-                            f"### Source {i + 1}"
-                        )
+                        source = result["source"]
+                        page = result["page"]
 
-                        st.write(
-                            f"**Source:** "
-                            f"{result['source']}"
-                        )
+                        if (source, page) in seen:
+                            continue
 
-                        st.write(
-                            f"**Section/Page:** "
-                            f"{result['page']}"
-                        )
+                        seen.add((source, page))
 
-                        st.write(
-                            result["text"]
-                        )
+                        c1, c2 = st.columns([5, 1])
 
-                        st.divider()
+                        with c1:
+                            st.write(
+                                f"📄 **{source}** "
+                                f"— Page **{page}**"
+                            )
 
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": answer
-                    }
+                        with c2:
+
+                            if st.button(
+                                "Open",
+                                key=f"source_{i}_{page}",
+                            ):
+                                open_source(
+                                    source,
+                                    page,
+                                )
+
+            except Exception as e:
+
+                answer = (
+                    "❌ Something went wrong "
+                    "while answering."
                 )
+
+                st.error(answer)
+                st.exception(e)
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": answer,
+        }
