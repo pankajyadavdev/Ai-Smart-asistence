@@ -147,10 +147,11 @@ def build_context(documents):
 # WHOLE PDF SUMMARY
 # ============================================================
 
-def generate_full_pdf_summary(documents, max_chars_per_part=18000):
-    """Summarize every extracted chunk/page in multiple passes.
+def generate_full_pdf_summary(documents, max_chars_per_part=50000):
+    """Fast whole-document summary.
 
-    This avoids sending a 90+ page document to the LLM in one request.
+    Uses a small number of LLM calls by batching many PDF chunks together.
+    This is designed to be much faster for large PDFs such as 90+ pages.
     """
     if not documents:
         raise ValueError("No document content available.")
@@ -184,54 +185,36 @@ def generate_full_pdf_summary(documents, max_chars_per_part=18000):
     if not parts:
         raise ValueError("The PDF contains no extractable text.")
 
+    # Keep the number of model calls low. A large PDF is summarized in
+    # batches, followed by one final consolidation call.
     partial_summaries = []
-
     for i, part in enumerate(parts, 1):
         prompt = f"""
-Create a detailed study summary of PART {i} of {len(parts)} from the student's PDF.
+Summarize this section of a college study PDF accurately and concisely.
 
-Rules:
-- Use ONLY the information provided below.
-- Cover all important definitions, concepts, explanations, examples, lists,
-  formulas, steps, and conclusions present in this part.
-- Keep important technical terms.
-- Do not invent information.
-- Organize the result with clear headings and bullet points.
-- This is an intermediate summary; do not omit important information just to
-  make it short.
+Cover the important definitions, concepts, formulas, examples, steps and
+conclusions. Use only the supplied text. Do not invent information.
 
-DOCUMENT PART:
+SECTION {i} OF {len(parts)}:
 {part}
 """
-        partial_summaries.append(generate_answer(
-            prompt,
-            part
-        ))
+        partial_summaries.append(generate_answer(prompt, part))
 
     if len(partial_summaries) == 1:
         return partial_summaries[0]
 
     combined = "\n\n".join(
-        f"SECTION SUMMARY {i}:\n{s}"
+        f"SECTION {i} SUMMARY:\n{s}"
         for i, s in enumerate(partial_summaries, 1)
     )
 
-    final_prompt = f"""
-Create one complete study summary by combining all the section summaries below.
-
-Rules:
-- Use ONLY the supplied section summaries.
-- Preserve all important information from every section.
-- Remove repetition where appropriate.
-- Keep technical definitions, important points, examples, formulas, steps,
-  and conclusions.
-- Organize the final result with headings and bullet points.
-- Do not mention that the text was processed in sections.
-- Do not invent information.
+    final_prompt = """
+Create one concise but complete study summary from the section summaries below.
+Preserve important information from every section, remove repetition, and use
+clear headings and bullet points. Do not invent information.
 
 SECTION SUMMARIES:
-{combined}
-"""
+""" + combined
 
     return generate_answer(final_prompt, combined)
 
@@ -344,7 +327,7 @@ with st.sidebar:
         )
 
         if st.button(
-            "✨ Generate Full PDF Summary",
+            "⚡ Generate Fast Full Summary",
             use_container_width=True,
         ):
 
