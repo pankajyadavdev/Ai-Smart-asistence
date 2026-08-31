@@ -377,7 +377,7 @@ with st.sidebar:
 
         qtype = st.selectbox(
             "Type",
-            ["MCQ", "Short Answer",Long Answer],
+            ["MCQ", "Short Answer","Long Answer"],
         )
 
         if st.button(
